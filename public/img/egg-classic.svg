@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 240">
+  <ellipse cx="100" cy="125" rx="70" ry="95" fill="#f7ecd4" stroke="#d9c08c" stroke-width="3"/>
+  <path d="M55 100 q20 -25 45 -10 q-10 20 -45 10z" fill="#e8d5a8"/>
+  <path d="M120 140 q25 -15 40 10 q-20 15 -40 -10z" fill="#e8d5a8"/>
+  <circle cx="80" cy="90" r="6" fill="#c9a86a"/>
+  <circle cx="125" cy="170" r="8" fill="#c9a86a"/>
+  <text x="100" y="130" font-size="26" text-anchor="middle" fill="#9a7a45" font-family="Georgia, serif">W</text>
+</svg>

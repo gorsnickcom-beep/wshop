@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warenkorb - W SHOP</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span>W</span> SHOP</a>
+  <nav class="topnav">
+    <a href="/cart">Warenkorb <span class="cart-count">0</span></a>
+  </nav>
+</header>
+
+<main class="wrap" style="max-width:720px">
+  <section class="panel">
+    <h2>Ihr Warenkorb</h2>
+    <div id="cart-lines"><div class="empty">Laden…</div></div>
+    <div id="cart-total"></div>
+    <div class="actions" id="cart-actions" style="display:none">
+      <a class="btn" href="/checkout">Zur Kasse</a>
+      <button class="btn ghost" id="clear-cart" type="button">Warenkorb leeren</button>
+    </div>
+  </section>
+</main>
+
+<script src="/js/store.js"></script>
+<script>
+WSHOP.header();
+const cart = WSHOP.getCart();
+const el = document.getElementById('cart-lines');
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+if (!cart.length) {
+  el.innerHTML = '<div class="empty">Ihr Warenkorb ist leer. <a href="/">Produkte ansehen</a></div>';
+} else {
+  WSHOP.api('/api/products').then(products => {
+    const byId = Object.fromEntries(products.map(p => [p.id, p]));
+    let total = 0;
+    el.innerHTML = cart.map(c => {
+      const p = byId[c.product_id];
+      if (!p) return '';
+      const isSpecial = c.variant === 'special';
+      const price = isSpecial ? (p.variant_price2 || p.price_cents) : p.price_cents;
+      const line = price * c.qty;
+      total += line;
+      const drawing = c.drawing_id
+        ? `<div class="sub">Eigene Zeichnung <img src="/uploads/drawings/${esc(c.drawing_id)}" style="width:36px;height:36px;border-radius:6px;vertical-align:middle"></div>`
+        : '';
+      const specialLabel = isSpecial ? '<div class="sub">Schaufenster-Banane</div>' : '';
+      return `<div class="line-item">
+        <img src="${p.image_path || '/img/egg-placeholder.svg'}" alt="">
+        <div class="info">
+          <div class="nm"><a href="/p/${encodeURIComponent(p.slug)}">${esc(p.name)}</a></div>
+          ${drawing}
+          ${specialLabel}
+          <div class="sub">${WSHOP.money(price)} EUR pro Stück</div>
+        </div>
+        <div class="qty">
+          <button type="button" data-act="dec" data-id="${p.id}" data-draw="${esc(c.drawing_id)}" data-variant="${c.variant||''}">-</button>
+          <input type="number" min="1" max="99" value="${c.qty}" data-id="${p.id}" data-draw="${esc(c.drawing_id)}" data-variant="${c.variant||''}">
+          <button type="button" data-act="inc" data-id="${p.id}" data-draw="${esc(c.drawing_id)}" data-variant="${c.variant||''}">+</button>
+        </div>
+        <div style="min-width:80px;text-align:right;font-weight:600">${WSHOP.money(line)}</div>
+        <button class="btn ghost small" data-act="del" data-id="${p.id}" data-draw="${esc(c.drawing_id)}" data-variant="${c.variant||''}" type="button">✕</button>
+      </div>`;
+    }).join('');
+    document.getElementById('cart-total').innerHTML = `<div class="totals">Gesamt: ${WSHOP.money(total)} EUR</div>`;
+    document.getElementById('cart-actions').style.display = 'flex';
+    document.getElementById('cart-actions').style.gap = '10px';
+  }).catch(() => {
+    el.innerHTML = '<div class="empty">Warenkorb konnte nicht geladen werden.</div>';
+  });
+}
+
+document.getElementById('cart-lines').addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  const id = Number(b.dataset.id), draw = b.dataset.draw || '', variant = b.dataset.variant || '';
+  const item = WSHOP.getCart().find(c => c.product_id === id && (c.drawing_id || '') === draw && (c.variant || '') === variant);
+  if (!item) return;
+  const act = b.dataset.act;
+  if (act === 'del') WSHOP.removeItem(id, draw, variant);
+  else if (act === 'inc') WSHOP.setQty(id, draw, variant, item.qty + 1);
+  else if (act === 'dec') WSHOP.setQty(id, draw, variant, item.qty - 1);
+  location.reload();
+});
+document.getElementById('cart-lines').addEventListener('change', e => {
+  if (e.target.matches('input[type=number]')) {
+    WSHOP.setQty(Number(e.target.dataset.id), e.target.dataset.draw || '', e.target.dataset.variant || '', Number(e.target.value) || 1);
+    location.reload();
+  }
+});
+document.getElementById('clear-cart').onclick = () => { WSHOP.clearCart(); location.reload(); };
+</script>
+</body>
+</html>

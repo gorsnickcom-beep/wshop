@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>W SHOP</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span>W</span> SHOP</a>
+  <nav class="topnav">
+    <a href="/cart">Warenkorb <span class="cart-count">0</span></a>
+  </nav>
+</header>
+
+<main class="wrap">
+  <p style="margin-top:18px"><a href="/" class="hint">&larr; Alle Produkte</a></p>
+  <section id="product" class="product"><div class="empty">Laden…</div></section>
+</main>
+
+<div id="egg-msg"></div>
+<script src="/js/store.js"></script>
+<script src="/js/draw.js"></script>
+<script>
+var product = null;
+var pendingDrawing = null;
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function renderProduct(p) {
+  product = p;
+  document.title = p.name + ' - W SHOP';
+  var soldOut = p.stock === 0;
+  var isBanana = p.variant === 'banana';
+  var drawingEnabled = p.drawing_enabled === 1;
+
+  var buyButtons = '';
+  if (isBanana) {
+    buyButtons = '<button class="btn" id="btn-cart"' + (soldOut ? ' disabled' : '') + '>4er-Bananenbund kaufen</button>' +
+      '<button class="btn" id="btn-special"' + (p.special_stock < 1 ? ' disabled' : '') + '>Die Banane aus dem Schaufenster kaufen (' + WSHOP.money(p.variant_price2 || p.price_cents) + ' EUR)</button>';
+  } else {
+    buyButtons = '<button class="btn" id="btn-cart"' + (soldOut ? ' disabled' : '') + '>In den Warenkorb</button>' +
+      '<button class="btn ghost" id="btn-buy"' + (soldOut ? ' disabled' : '') + '>Jetzt kaufen</button>';
+  }
+
+  var drawButton = drawingEnabled ? '<button class="btn ghost" id="btn-draw" type="button">Auf Ei zeichnen</button>' : '';
+
+  document.getElementById('product').innerHTML =
+    '<div class="imgbox"><img src="' + (p.image_path || '/img/egg-placeholder.svg') + '" alt="' + esc(p.name) + '"></div>' +
+    '<div>' +
+    '<h1>' + esc(p.name) + '</h1>' +
+    '<div class="price" style="font-size:22px;margin:6px 0">' + WSHOP.money(p.price_cents) + ' <small>EUR</small></div>' +
+    '<div class="desc">' + esc(p.description || '') + '</div>' +
+    '<div class="hint" style="margin:8px 0">' + (soldOut ? 'Ausverkauft' : (p.stock === -1 ? 'Verfügbar' : p.stock + ' verfügbar')) + '</div>' +
+    (isBanana && p.special_stock > 0 ? '<div class="hint" style="margin:4px 0">Schaufenster-Banane: ' + p.special_stock + ' verfügbar</div>' : '') +
+    '<div class="actions">' +
+    '<div class="qty">' +
+    '<button type="button" onclick="stepQty(-1)">-</button>' +
+    '<input id="qty" type="number" min="1" max="99" value="1">' +
+    '<button type="button" onclick="stepQty(1)">+</button>' +
+    '</div>' +
+    '</div>' +
+    '<div class="actions">' + buyButtons + drawButton + '</div>' +
+    '<div id="custom-note"></div>' +
+    '</div>';
+
+  document.getElementById('btn-cart').onclick = function() {
+    WSHOP.addToCart({ product_id: product.id, qty: Number(document.getElementById('qty').value) || 1, drawing_id: pendingDrawing ? pendingDrawing.drawing_id : '', drawing_thumb: pendingDrawing ? pendingDrawing.thumb : '' });
+    showMsg('<div class="msg ok">Zum Warenkorb hinzugefügt.</div>');
+  };
+  var btnBuy = document.getElementById('btn-buy');
+  if (btnBuy) btnBuy.onclick = function() {
+    WSHOP.addToCart({ product_id: product.id, qty: Number(document.getElementById('qty').value) || 1, drawing_id: pendingDrawing ? pendingDrawing.drawing_id : '', drawing_thumb: pendingDrawing ? pendingDrawing.thumb : '' });
+    location.href = '/checkout';
+  };
+  var btnSpecial = document.getElementById('btn-special');
+  if (btnSpecial) btnSpecial.onclick = function() {
+    WSHOP.addToCart({ product_id: product.id, qty: 1, variant: 'special', drawing_id: '', drawing_thumb: '' });
+    showMsg('<div class="msg ok">Schaufenster-Banane zum Warenkorb hinzugefügt.</div>');
+  };
+  var btnDraw = document.getElementById('btn-draw');
+  if (btnDraw) btnDraw.onclick = function() {
+    EggDrawer.open({ onSave: function(d) {
+      pendingDrawing = d;
+      document.getElementById('custom-note').innerHTML =
+        '<div class="msg info">Zeichnung gespeichert – sie wird beim Kauf hinzugefügt. <img src="' + d.thumb + '" style="width:56px;height:56px;border-radius:8px;vertical-align:middle"></div>';
+    }});
+  };
+}
+
+function stepQty(d) {
+  var el = document.getElementById('qty');
+  if (!el) return;
+  el.value = Math.min(99, Math.max(1, (Number(el.value) || 1) + d));
+}
+
+function showMsg(html) {
+  var m = document.getElementById('egg-msg');
+  m.innerHTML = html;
+  setTimeout(function() { m.innerHTML = ''; }, 4000);
+}
+
+WSHOP.header();
+
+if (window.__PRODUCT_DATA) {
+  renderProduct(window.__PRODUCT_DATA);
+} else {
+  var slug = decodeURIComponent(location.pathname.split('/p/')[1] || '');
+  fetch('/api/products/' + encodeURIComponent(slug)).then(function(r) {
+    if (!r.ok) throw new Error('Produkt nicht gefunden');
+    return r.json();
+  }).catch(function(e) {
+    console.error('API error:', e);
+    document.getElementById('product').innerHTML = '<div class="empty">Fehler beim Laden: ' + esc(e.message) + '</div>';
+    throw e;
+  }).then(function(p) {
+    renderProduct(p);
+  }).catch(function(e) {
+    document.getElementById('product').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  });
+}
+</script>
+</body>
+</html>

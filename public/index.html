@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>W SHOP</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span>W</span> SHOP</a>
+  <nav class="topnav">
+    <a href="/cart">Warenkorb <span class="cart-count">0</span></a>
+  </nav>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>Willkommen bei W SHOP</h1>
+    <p id="intro-text">Laden…</p>
+  </section>
+  <section id="products" class="grid"><div class="empty">Laden…</div></section>
+</main>
+
+<script src="/js/store.js"></script>
+<script>
+(function() {
+  WSHOP.header();
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  fetch('/api/public/settings').then(r => r.json()).then(s => {
+    document.getElementById('intro-text').textContent = s.intro_text || '';
+  }).catch(() => {});
+
+  fetch('/api/products').then(r => r.json()).then(products => {
+    const el = document.getElementById('products');
+    if (!products.length) { el.innerHTML = '<div class="empty">Keine Produkte verfügbar.</div>'; return; }
+    el.innerHTML = products.map(p => `
+      <a class="card" href="/p/${encodeURIComponent(p.slug)}">
+        <div class="thumb"><img src="${p.image_path || '/img/egg-placeholder.svg'}" alt="${esc(p.name)}" loading="lazy"></div>
+        <div class="body">
+          <h3>${esc(p.name)}</h3>
+          <div class="desc">${esc(p.description || '')}</div>
+          <div class="row">
+            <span class="price">${WSHOP.money(p.price_cents)} <small>EUR</small></span>
+            <span class="hint">${p.stock === -1 || p.stock > 0 ? 'Verfügbar' : 'Ausverkauft'}</span>
+          </div>
+        </div>
+      </a>`).join('');
+  }).catch(e => {
+    console.error('Products load error:', e);
+    document.getElementById('products').innerHTML = '<div class="empty">Produkte konnten nicht geladen werden. Fehler: ' + esc(e.message) + '</div>';
+  });
+})();
+</script>
+</body>
+</html>
