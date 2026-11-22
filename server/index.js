@@ -93,7 +93,7 @@ async function initDB() {
   `);
 }
 
-initDB().catch(console.error);
+const dbReady = initDB().catch(err => { console.error(err); process.exit(1); });
 
 function getSetting(key, fallback = null) {
   return query('SELECT value FROM settings WHERE key = $1', [key]).then(rows => rows[0]?.value || fallback);
@@ -119,6 +119,7 @@ const DEFAULT_INTRO = 'Willkommen bei W SHOP – entdecke Produkte aus unserem S
 
 // Initialize defaults
 (async () => {
+  await dbReady;
   const palette = await getSetting('palette');
   if (!palette) await setJSON('palette', DEFAULT_PALETTE);
   const locations = await getSetting('locations');
@@ -163,6 +164,7 @@ function verifyPass(pw, stored) {
 
 let admin = { user: 'admin', passHash: null };
 (async () => {
+  await dbReady;
   let user = process.env.ADMIN_USER || await getSetting('admin_user');
   let passHash = process.env.ADMIN_PASS ? hashPass(process.env.ADMIN_PASS) : await getSetting('admin_pass_hash');
   if (!user || !passHash) {
