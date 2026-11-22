@@ -381,8 +381,9 @@ app.post('/api/admin/login', async (req, res) => {
   const { username, password } = req.body || {};
   const envUser = process.env.ADMIN_USER || admin.user;
   const envHash = process.env.ADMIN_PASS ? hashPass(process.env.ADMIN_PASS) : admin.passHash;
-  const dbUser = await getSetting('admin_user', envUser);
-  const dbHash = await getSetting('admin_pass_hash', envHash);
+  // ADMIN_USER / ADMIN_PASS env vars win over values stored in the DB.
+  const dbUser = process.env.ADMIN_USER || await getSetting('admin_user', envUser);
+  const dbHash = process.env.ADMIN_PASS ? envHash : await getSetting('admin_pass_hash', envHash);
   if (username !== dbUser || !verifyPass(password || '', dbHash)) {
     recordLoginFail(ip);
     return res.status(401).json({ error: 'Invalid credentials' });
