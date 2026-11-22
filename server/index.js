@@ -392,7 +392,7 @@ function validateProduct(body, partial = false) {
     out.stock = s;
   }
   if (body.available !== undefined) out.available = body.available ? 1 : 0;
-  if (body.sort !== undefined) out.sort = Math.floor(Number(body.sort) || 0;
+  if (body.sort !== undefined) out.sort = Math.floor(Number(body.sort) || 0);
   if (body.variant !== undefined) out.variant = String(body.variant).slice(0, 20);
   if (body.variant_price2 !== undefined) {
     const c = Math.round(Number(body.variant_price2));
