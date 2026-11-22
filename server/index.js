@@ -1,11 +1,11 @@
-// W SHOP server - Express + SQLite + local file storage.
-// All secrets come from environment variables or data/ files; nothing is hard-coded.
+// W SHOP server - Express + PostgreSQL (Railway) + persistent storage.
+// Works from any network with Railway free tier.
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { DatabaseSync } = require('node:sqlite');
+const { Pool } = require('pg');
 const multer = require('multer');
 const QRCode = require('qrcode');
 const nodemailer = require('nodemailer');
@@ -14,73 +14,99 @@ const ROOT = path.join(__dirname, '..');
 const DATA_DIR = path.join(ROOT, 'data');
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(path.join(UPLOAD_DIR, 'drawings'), { recursive: true });
 
 const PORT = process.env.PORT || 3000;
-const PUBLIC_URL = process.env.PUBLIC_URL || 'https://wshop.onrender.com'; // Your public domain for QR codes
+const PUBLIC_URL = process.env.PUBLIC_URL || ''; // Set to Railway domain for QR codes
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
 
-// ---------- Database ----------
-const db = new DatabaseSync(path.join(DATA_DIR, 'wshop.db'));
-db.exec(`
-PRAGMA journal_mode = WAL;
-CREATE TABLE IF NOT EXISTS products (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  slug TEXT UNIQUE NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  price_cents INTEGER NOT NULL DEFAULT 0,
-  stock INTEGER NOT NULL DEFAULT 0,
-  available INTEGER NOT NULL DEFAULT 1,
-  image_path TEXT DEFAULT '',
-  sort INTEGER NOT NULL DEFAULT 0,
-  variant TEXT DEFAULT '',
-  variant_price2 INTEGER DEFAULT 0,
-  special_stock INTEGER DEFAULT 0,
-  drawing_enabled INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS orders (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  customer_name TEXT NOT NULL,
-  email TEXT DEFAULT '',
-  phone TEXT DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'new',
-  admin_notes TEXT DEFAULT '',
-  read_at TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS order_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  product_id INTEGER,
-  product_name TEXT NOT NULL,
-  price_cents INTEGER NOT NULL,
-  qty INTEGER NOT NULL DEFAULT 1,
-  drawing_path TEXT DEFAULT '',
-  variant TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
-  token TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL
-);
-`);
+// ---------- PostgreSQL ----------
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('rds.amazonaws.com') ? { rejectUnauthorized: false } : false,
+});
+
+async function query(sql, params = []) {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(sql, params);
+    return result.rows;
+  } finally {
+    client.release();
+  }
+}
+
+async function initDB() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      slug TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      price_cents INTEGER NOT NULL DEFAULT 0,
+      stock INTEGER NOT NULL DEFAULT 0,
+      available INTEGER NOT NULL DEFAULT 1,
+      image_path TEXT DEFAULT '',
+      sort INTEGER NOT NULL DEFAULT 0,
+      variant TEXT DEFAULT '',
+      variant_price2 INTEGER DEFAULT 0,
+      special_stock INTEGER DEFAULT 0,
+      drawing_enabled INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id SERIAL PRIMARY KEY,
+      customer_name TEXT NOT NULL,
+      email TEXT DEFAULT '',
+      phone TEXT DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'new',
+      admin_notes TEXT DEFAULT '',
+      read_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS order_items (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      product_id INTEGER,
+      product_name TEXT NOT NULL,
+      price_cents INTEGER NOT NULL,
+      qty INTEGER NOT NULL DEFAULT 1,
+      drawing_path TEXT DEFAULT '',
+      variant TEXT DEFAULT ''
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      created_at BIGINT NOT NULL
+    );
+  `);
+}
+
+initDB().catch(console.error);
 
 function getSetting(key, fallback = null) {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-  return row ? row.value : fallback;
+  return query('SELECT value FROM settings WHERE key = $1', [key]).then(rows => rows[0]?.value || fallback);
 }
 function setSetting(key, value) {
-  db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-    .run(key, String(value));
+  return query('INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key, String(value)]);
 }
 function getJSON(key, fallback) {
-  try { return JSON.parse(getSetting(key, '')); } catch { return fallback; }
+  return getSetting(key, '').then(v => {
+    try { return JSON.parse(v); } catch { return fallback; }
+  });
 }
-function setJSON(key, value) { setSetting(key, JSON.stringify(value)); }
+function setJSON(key, value) { return setSetting(key, JSON.stringify(value)); }
 
 // ---------- Defaults / seed ----------
 const DEFAULT_PALETTE = ['#1a1a1a', '#c0392b', '#e67e22', '#f1c40f', '#2ecc71', '#3498db', '#9b59b6', '#e84393', '#ffffff'];
@@ -91,29 +117,36 @@ const DEFAULT_TEMPLATES = {
 };
 const DEFAULT_INTRO = 'Willkommen bei W SHOP – entdecke Produkte aus unserem Schaufenster. Scanne einen QR-Code, wähle ein Produkt und bestelle online. Der Erlös geht an wohltätige Zwecke.';
 
-if (!getSetting('palette')) setJSON('palette', DEFAULT_PALETTE);
-if (!getSetting('locations')) setJSON('locations', DEFAULT_LOCATIONS);
-if (!getSetting('templates')) setJSON('templates', DEFAULT_TEMPLATES);
-if (!getSetting('store_name')) setSetting('store_name', 'W SHOP');
-if (!getSetting('intro_text')) setSetting('intro_text', DEFAULT_INTRO);
+// Initialize defaults
+(async () => {
+  const palette = await getSetting('palette');
+  if (!palette) await setJSON('palette', DEFAULT_PALETTE);
+  const locations = await getSetting('locations');
+  if (!locations) await setJSON('locations', DEFAULT_LOCATIONS);
+  const templates = await getSetting('templates');
+  if (!templates) await setJSON('templates', DEFAULT_TEMPLATES);
+  const storeName = await getSetting('store_name');
+  if (!storeName) await setSetting('store_name', 'W SHOP');
+  const introText = await getSetting('intro_text');
+  if (!introText) await setSetting('intro_text', DEFAULT_INTRO);
 
-// Re-seed if seed_version changed
-const SEED_VERSION = 2;
-if (getSetting('seed_version', '0') !== String(SEED_VERSION)) {
-  db.exec('DELETE FROM products');
-  db.exec('DELETE FROM order_items');
-  db.exec('DELETE FROM orders');
-  const seed = db.prepare(`INSERT INTO products(slug,name,description,price_cents,stock,available,image_path,sort,variant,variant_price2,special_stock,drawing_enabled)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const items = [
-    ['ei', 'Handbemaltes Ei', 'Verziere dein eigenes Ei mit unserem Zeicheneditor.', 1200, 50, 1, '/img/egg-placeholder.svg', 1, '', 0, 0, 1],
-    ['banane', 'Banane', 'Frische Banane aus dem Schaufenster.', 500, 50, 1, '/img/banane-placeholder.svg', 2, 'banana', 10000, 1, 0],
-    ['produkt-3', 'Produkt 3', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/placeholder.svg', 3, '', 0, 0, 0],
-    ['produkt-4', 'Produkt 4', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/placeholder.svg', 4, '', 0, 0, 0],
-  ];
-  for (const it of items) seed.run(...it);
-  setSetting('seed_version', String(SEED_VERSION));
-}
+  const seedVersion = await getSetting('seed_version', '0');
+  if (seedVersion !== '2') {
+    await query('DELETE FROM order_items');
+    await query('DELETE FROM orders');
+    await query('DELETE FROM products');
+    const items = [
+      ['ei', 'Handbemaltes Ei', 'Verziere dein eigenes Ei mit unserem Zeicheneditor.', 1200, 50, 1, '/img/egg-placeholder.svg', 1, '', 0, 0, 1],
+      ['banane', 'Banane', 'Frische Banane aus dem Schaufenster.', 500, 50, 1, '/img/banane-placeholder.svg', 2, 'banana', 10000, 1, 0],
+      ['produkt-3', 'Produkt 3', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/placeholder.svg', 3, '', 0, 0, 0],
+      ['produkt-4', 'Produkt 4', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/placeholder.svg', 4, '', 0, 0, 0],
+    ];
+    for (const it of items) {
+      await query(`INSERT INTO products(slug,name,description,price_cents,stock,available,image_path,sort,variant,variant_price2,special_stock,drawing_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, it);
+    }
+    await setSetting('seed_version', '2');
+  }
+})();
 
 // ---------- Admin credentials ----------
 function hashPass(pw, salt) {
@@ -128,22 +161,22 @@ function verifyPass(pw, stored) {
   return test.length === orig.length && crypto.timingSafeEqual(test, orig);
 }
 
-function ensureAdmin() {
-  let user = process.env.ADMIN_USER || getSetting('admin_user');
-  let passHash = process.env.ADMIN_PASS ? hashPass(process.env.ADMIN_PASS) : getSetting('admin_pass_hash');
+let admin = { user: 'admin', passHash: null };
+(async () => {
+  let user = process.env.ADMIN_USER || await getSetting('admin_user');
+  let passHash = process.env.ADMIN_PASS ? hashPass(process.env.ADMIN_PASS) : await getSetting('admin_pass_hash');
   if (!user || !passHash) {
     user = user || 'admin';
     const pass = crypto.randomBytes(9).toString('base64url');
     passHash = hashPass(pass);
-    setSetting('admin_user', user);
-    setSetting('admin_pass_hash', passHash);
+    await setSetting('admin_user', user);
+    await setSetting('admin_pass_hash', passHash);
     fs.writeFileSync(path.join(DATA_DIR, 'admin-credentials.txt'),
       `W SHOP admin login\nusername: ${user}\npassword: ${pass}\n(change it in Admin > Settings)\n`);
     console.log(`[wshop] Admin credentials written to data/admin-credentials.txt (user: ${user})`);
   }
-  return { user, passHash };
-}
-const admin = ensureAdmin();
+  admin = { user, passHash };
+})();
 
 // Rate limiting
 const loginAttempts = new Map();
@@ -197,13 +230,14 @@ function clientIP(req) {
 }
 
 // ---------- Auth middleware ----------
-function requireAdmin(req, res, next) {
+async function requireAdmin(req, res, next) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
-  const row = db.prepare('SELECT created_at FROM sessions WHERE token = ?').get(token);
+  const rows = await query('SELECT created_at FROM sessions WHERE token = $1', [token]);
+  const row = rows[0];
   if (!row || Date.now() - row.created_at > SESSION_TTL_MS) {
-    if (row) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    if (row) await query('DELETE FROM sessions WHERE token = $1', [token]);
     return res.status(401).json({ error: 'Session expired' });
   }
   req.adminToken = token;
@@ -211,23 +245,24 @@ function requireAdmin(req, res, next) {
 }
 
 // ---------- Public API ----------
-app.get('/api/products', (req, res) => {
-  const rows = db.prepare('SELECT id,slug,name,description,price_cents,stock,available,image_path,variant,variant_price2,special_stock,drawing_enabled FROM products WHERE available=1 ORDER BY sort,id').all();
+app.get('/api/products', async (req, res) => {
+  const rows = await query('SELECT id,slug,name,description,price_cents,stock,available,image_path,variant,variant_price2,special_stock,drawing_enabled FROM products WHERE available=1 ORDER BY sort,id');
   res.json(rows.map(p => ({ ...p, in_stock: p.stock !== 0, special_available: p.special_stock > 0 })));
 });
 
-app.get('/api/products/:slug', (req, res) => {
-  const p = db.prepare('SELECT id,slug,name,description,price_cents,stock,available,image_path,variant,variant_price2,special_stock,drawing_enabled FROM products WHERE slug=?').get(req.params.slug);
+app.get('/api/products/:slug', async (req, res) => {
+  const rows = await query('SELECT id,slug,name,description,price_cents,stock,available,image_path,variant,variant_price2,special_stock,drawing_enabled FROM products WHERE slug=$1', [req.params.slug]);
+  const p = rows[0];
   if (!p || !p.available) return res.status(404).json({ error: 'Not found' });
   res.json({ ...p, in_stock: p.stock !== 0, special_available: p.special_stock > 0 });
 });
 
-app.get('/api/public/settings', (req, res) => {
+app.get('/api/public/settings', async (req, res) => {
   res.json({
-    store_name: getSetting('store_name', 'W SHOP'),
-    intro_text: getSetting('intro_text', DEFAULT_INTRO),
-    palette: getJSON('palette', DEFAULT_PALETTE),
-    locations: getJSON('locations', DEFAULT_LOCATIONS),
+    store_name: await getSetting('store_name', 'W SHOP'),
+    intro_text: await getSetting('intro_text', DEFAULT_INTRO),
+    palette: await getJSON('palette', DEFAULT_PALETTE),
+    locations: await getJSON('locations', DEFAULT_LOCATIONS),
   });
 });
 
@@ -245,7 +280,7 @@ app.post('/api/drawings', (req, res) => {
 });
 
 // Orders
-app.post('/api/orders', (req, res) => {
+app.post('/api/orders', async (req, res) => {
   const { customer_name, email, phone, items } = req.body || {};
   if (!customer_name || !String(customer_name).trim()) return res.status(400).json({ error: 'Name is required' });
   if (!email || !String(email).trim()) return res.status(400).json({ error: 'E-Mail is required' });
@@ -257,7 +292,8 @@ app.post('/api/orders', (req, res) => {
   for (const it of items) {
     const qty = Math.floor(Number(it.qty));
     if (!Number.isFinite(qty) || qty < 1 || qty > 99) return res.status(400).json({ error: 'Invalid quantity' });
-    const p = db.prepare('SELECT * FROM products WHERE id=? AND available=1').get(Number(it.product_id));
+    const prows = await query('SELECT * FROM products WHERE id=$1 AND available=1', [Number(it.product_id)]);
+    const p = prows[0];
     if (!p) return res.status(400).json({ error: 'Product unavailable' });
     const isSpecial = it.variant === 'special';
     if (isSpecial) {
@@ -279,50 +315,51 @@ app.post('/api/orders', (req, res) => {
     total += price * qty;
   }
 
-  const insertOrder = db.prepare(`INSERT INTO orders(customer_name,email,phone,status) VALUES(?,?,?,?,'new')`);
-  const insertItem = db.prepare(`INSERT INTO order_items(order_id,product_id,product_name,price_cents,qty,drawing_path,variant) VALUES(?,?,?,?,?,?,?,?)`);
-  const decStock = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock != -1');
-  const decSpecial = db.prepare('UPDATE products SET special_stock = special_stock - ? WHERE id = ? AND special_stock > 0');
-
-  let orderId;
-  db.exec('BEGIN');
+  const client = await pool.connect();
   try {
-    const r = insertOrder.run(String(customer_name).slice(0, 200), String(email || '').slice(0, 200), String(phone || '').slice(0, 50));
-    orderId = Number(r.lastInsertRowid);
+    await client.query('BEGIN');
+    const orderResult = await client.query('INSERT INTO orders(customer_name,email,phone,status) VALUES($1,$2,$3,$4) RETURNING id', [String(customer_name).slice(0, 200), String(email || '').slice(0, 200), String(phone || '').slice(0, 50), 'new']);
+    const orderId = orderResult.rows[0].id;
     for (const l of lines) {
-      insertItem.run(orderId, l.product.id, l.product.name, l.price, l.qty, l.drawingPath, l.isSpecial ? 'special' : '');
-      if (l.isSpecial) decSpecial.run(l.qty, l.product.id);
-      else decStock.run(l.qty, l.product.id);
+      await client.query('INSERT INTO order_items(order_id,product_id,product_name,price_cents,qty,drawing_path,variant) VALUES($1,$2,$3,$4,$5,$6,$7)', [orderId, l.product.id, l.product.name, l.price, l.qty, l.drawingPath, l.isSpecial ? 'special' : '']);
+      if (l.isSpecial) {
+        await client.query('UPDATE products SET special_stock = special_stock - $1 WHERE id = $2 AND special_stock > 0', [l.qty, l.product.id]);
+      } else {
+        await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock != -1', [l.qty, l.product.id]);
+      }
     }
-    db.exec('COMMIT');
+    await client.query('COMMIT');
+
+    // Notifications
+    const templates = await getJSON('templates', DEFAULT_TEMPLATES);
+    const vars = { order_id: orderId, customer_name, phone, total: (total / 100).toFixed(2) };
+    const adminMail = process.env.ADMIN_EMAIL;
+    if (adminMail) {
+      sendMail(adminMail, `New order #${orderId} - ${customer_name}`, renderTemplate(templates.order_admin, vars));
+    }
+    if (email) {
+      sendMail(email, `Order #${orderId} received - ${await getSetting('store_name', 'W SHOP')}`,
+        renderTemplate(templates.order_received, vars) + `\nTotal: ${(total / 100).toFixed(2)} EUR`);
+    }
+
+    res.json({ ok: true, order_id: orderId });
   } catch (e) {
-    db.exec('ROLLBACK');
+    await client.query('ROLLBACK');
     throw e;
+  } finally {
+    client.release();
   }
-
-  // Notifications
-  const templates = getJSON('templates', DEFAULT_TEMPLATES);
-  const vars = { order_id: orderId, customer_name, phone, total: (total / 100).toFixed(2) };
-  const adminMail = process.env.ADMIN_EMAIL;
-  if (adminMail) {
-    sendMail(adminMail, `New order #${orderId} - ${customer_name}`, renderTemplate(templates.order_admin, vars));
-  }
-  if (email) {
-    sendMail(email, `Order #${orderId} received - ${getSetting('store_name', 'W SHOP')}`,
-      renderTemplate(templates.order_received, vars) + `\nTotal: ${(total / 100).toFixed(2)} EUR`);
-  }
-
-  res.json({ ok: true, order_id: orderId });
 });
 
-// QR codes - IMPORTANT: Uses PUBLIC_URL env var for QR generation
+// QR codes
 function productUrl(req, slug) {
   const protocol = req.protocol || 'http';
   const host = req.get('host') || 'localhost:3000';
   return `${protocol}://${host}/p/${slug}`;
 }
 app.get('/qr/:slug.svg', async (req, res) => {
-  const p = db.prepare('SELECT slug FROM products WHERE slug=?').get(req.params.slug);
+  const rows = await query('SELECT slug FROM products WHERE slug=$1', [req.params.slug]);
+  const p = rows[0];
   if (!p) return res.status(404).send('Not found');
   try {
     const svg = await QRCode.toString(productUrl(req, p.slug), { type: 'svg', margin: 1, width: 400 });
@@ -333,40 +370,40 @@ app.get('/qr/:slug.svg', async (req, res) => {
 });
 
 // ---------- Admin API ----------
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const ip = clientIP(req);
   if (loginLimited(ip)) return res.status(429).json({ error: 'Too many attempts. Try again later.' });
   const { username, password } = req.body || {};
   const envUser = process.env.ADMIN_USER || admin.user;
   const envHash = process.env.ADMIN_PASS ? hashPass(process.env.ADMIN_PASS) : admin.passHash;
-  const dbUser = getSetting('admin_user', envUser);
-  const dbHash = getSetting('admin_pass_hash', envHash);
+  const dbUser = await getSetting('admin_user', envUser);
+  const dbHash = await getSetting('admin_pass_hash', envHash);
   if (username !== dbUser || !verifyPass(password || '', dbHash)) {
     recordLoginFail(ip);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   loginAttempts.delete(ip);
   const token = crypto.randomBytes(32).toString('hex');
-  db.prepare('INSERT INTO sessions(token,created_at) VALUES(?,?)').run(token, Date.now());
+  await query('INSERT INTO sessions(token,created_at) VALUES($1,$2)', [token, Date.now()]);
   res.json({ ok: true, token });
 });
 
-app.post('/api/admin/logout', requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM sessions WHERE token=?').run(req.adminToken);
+app.post('/api/admin/logout', requireAdmin, async (req, res) => {
+  await query('DELETE FROM sessions WHERE token=$1', [req.adminToken]);
   res.json({ ok: true });
 });
 
-app.get('/api/admin/me', requireAdmin, (req, res) => res.json({ ok: true }));
+app.get('/api/admin/me', requireAdmin, async (req, res) => res.json({ ok: true }));
 
-app.get('/api/admin/overview', requireAdmin, (req, res) => {
-  const unread = db.prepare('SELECT COUNT(*) c FROM orders WHERE read_at IS NULL').get().c;
-  const ordersToday = db.prepare("SELECT COUNT(*) c FROM orders WHERE date(created_at)=date('now')").get().c;
+app.get('/api/admin/overview', requireAdmin, async (req, res) => {
+  const unread = (await query('SELECT COUNT(*) c FROM orders WHERE read_at IS NULL'))[0].c;
+  const ordersToday = (await query("SELECT COUNT(*) c FROM orders WHERE DATE(created_at)=CURRENT_DATE"))[0].c;
   res.json({ unread_orders: unread, orders_today: ordersToday, email_configured: !!mailer() });
 });
 
 // Products CRUD
-app.get('/api/admin/products', requireAdmin, (req, res) => {
-  res.json(db.prepare('SELECT * FROM products ORDER BY sort,id').all());
+app.get('/api/admin/products', requireAdmin, async (req, res) => {
+  res.json(await query('SELECT * FROM products ORDER BY sort,id'));
 });
 
 function validateProduct(body, partial = false) {
@@ -408,35 +445,36 @@ function validateProduct(body, partial = false) {
   return { out };
 }
 
-app.post('/api/admin/products', requireAdmin, (req, res) => {
+app.post('/api/admin/products', requireAdmin, async (req, res) => {
   const { out, error } = validateProduct(req.body || {});
   if (error) return res.status(400).json({ error });
-  const dup = db.prepare('SELECT id FROM products WHERE slug=?').get(out.slug);
+  const dup = (await query('SELECT id FROM products WHERE slug=$1', [out.slug]))[0];
   if (dup) return res.status(400).json({ error: 'Slug already exists' });
-  const r = db.prepare(`INSERT INTO products(slug,name,description,price_cents,stock,available,image_path,sort,variant,variant_price2,special_stock,drawing_enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(out.slug, out.name, out.description || '', out.price_cents, out.stock ?? 0, out.available || 1, out.image_path || '', out.sort ?? 0, out.variant || '', out.variant_price2 || 0, out.special_stock || 0, out.drawing_enabled || 0);
-  res.json({ ok: true, id: Number(r.lastInsertRowid) });
+  const r = await query(`INSERT INTO products(slug,name,description,price_cents,stock,available,image_path,sort,variant,variant_price2,special_stock,drawing_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+    [out.slug, out.name, out.description || '', out.price_cents, out.stock ?? 0, out.available || 1, out.image_path || '', out.sort ?? 0, out.variant || '', out.variant_price2 || 0, out.special_stock || 0, out.drawing_enabled || 0]);
+  res.json({ ok: true, id: r[0].id });
 });
 
-app.put('/api/admin/products/:id', requireAdmin, (req, res) => {
+app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
-  const exists = db.prepare('SELECT * FROM products WHERE id=?').get(id);
+  const exists = (await query('SELECT * FROM products WHERE id=$1', [id]))[0];
   if (!exists) return res.status(404).json({ error: 'Not found' });
   const { out, error } = validateProduct(req.body || {}, true);
   if (error) return res.status(400).json({ error });
   if (out.slug) {
-    const dup = db.prepare('SELECT id FROM products WHERE slug=? AND id!=?').get(out.slug, id);
+    const dup = (await query('SELECT id FROM products WHERE slug=$1 AND id!=$2', [out.slug, id]))[0];
     if (dup) return res.status(400).json({ error: 'Slug already exists' });
   }
   const fields = Object.keys(out);
   if (fields.length) {
-    db.prepare(`UPDATE products SET ${fields.map(f => `${f}=?`).join(',')} WHERE id=?`).run(...fields.map(f => out[f]), id);
+    const setClause = fields.map((f, i) => `${f}=$${i + 2}`).join(',');
+    await query(`UPDATE products SET ${setClause} WHERE id=$1`, [id, ...fields.map(f => out[f])]);
   }
   res.json({ ok: true });
 });
 
-app.delete('/api/admin/products/:id', requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM products WHERE id=?').run(Number(req.params.id));
+app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  await query('DELETE FROM products WHERE id=$1', [Number(req.params.id)]);
   res.json({ ok: true });
 });
 
@@ -452,46 +490,48 @@ const upload = multer({
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
 });
 
-app.post('/api/admin/products/:id/image', requireAdmin, upload.single('image'), (req, res) => {
+app.post('/api/admin/products/:id/image', requireAdmin, upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
-  const p = db.prepare('SELECT * FROM products WHERE id=?').get(Number(req.params.id));
+  const p = (await query('SELECT * FROM products WHERE id=$1', [Number(req.params.id)]))[0];
   if (!p) return res.status(404).json({ error: 'Not found' });
-  if (p.imagePath) {
-    const oldFile = path.join(UPLOAD_DIR, path.basename(p.imagePath));
+  if (p.image_path) {
+    const oldFile = path.join(UPLOAD_DIR, path.basename(p.image_path));
     if (fs.existsSync(oldFile)) fs.unlinkSync(oldFile);
   }
-  db.prepare('UPDATE products SET image_path=? WHERE id=?').run(`/uploads/${req.file.filename}`, p.id);
+  await query('UPDATE products SET image_path=$1 WHERE id=$2', [`/uploads/${req.file.filename}`, p.id]);
   res.json({ ok: true, image_path: `/uploads/${req.file.filename}` });
 });
 
 // Orders
-app.get('/api/admin/orders', requireAdmin, (req, res) => {
+app.get('/api/admin/orders', requireAdmin, async (req, res) => {
   const status = String(req.query.status || '');
   const rows = status
-    ? db.prepare('SELECT * FROM orders WHERE status=? ORDER BY id DESC LIMIT 500').all(status)
-    : db.prepare('SELECT * FROM orders ORDER BY id DESC LIMIT 500').all();
+    ? await query('SELECT * FROM orders WHERE status=$1 ORDER BY id DESC LIMIT 500', [status])
+    : await query('SELECT * FROM orders ORDER BY id DESC LIMIT 500');
   res.json(rows);
 });
 
-app.get('/api/admin/orders/:id', requireAdmin, (req, res) => {
-  const order = db.prepare('SELECT * FROM orders WHERE id=?').get(Number(req.params.id));
+app.get('/api/admin/orders/:id', requireAdmin, async (req, res) => {
+  const order = (await query('SELECT * FROM orders WHERE id=$1', [Number(req.params.id)]))[0];
   if (!order) return res.status(404).json({ error: 'Not found' });
-  const items = db.prepare('SELECT * FROM order_items WHERE order_id=?').all(order.id);
-  if (!order.readAt) db.prepare("UPDATE orders SET read_at=datetime('now') WHERE id=?").run(order.id);
+  const items = await query('SELECT * FROM order_items WHERE order_id=$1', [order.id]);
+  if (!order.read_at) {
+    await query('UPDATE orders SET read_at=NOW() WHERE id=$1', [order.id]);
+  }
   res.json({ ...order, items });
 });
 
 const ORDER_STATUSES = ['new', 'processing', 'ready', 'completed', 'cancelled'];
-app.put('/api/admin/orders/:id', requireAdmin, (req, res) => {
+app.put('/api/admin/orders/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
-  const order = db.prepare('SELECT * FROM orders WHERE id=?').get(id);
+  const order = (await query('SELECT * FROM orders WHERE id=$1', [id]))[0];
   if (!order) return res.status(404).json({ error: 'Not found' });
   const { status, admin_notes } = req.body || {};
   if (status !== undefined) {
     if (!ORDER_STATUSES.includes(status)) return res.status(400).json({ error: 'Invalid status' });
-    db.prepare('UPDATE orders SET status=? WHERE id=?').run(status, id);
+    await query('UPDATE orders SET status=$1 WHERE id=$2', [status, id]);
   }
-  if (admin_notes !== undefined) db.prepare('UPDATE orders SET admin_notes=? WHERE id=?').run(String(admin_notes).slice(0, 2000), id);
+  if (admin_notes !== undefined) await query('UPDATE orders SET admin_notes=$1 WHERE id=$2', [String(admin_notes).slice(0, 2000), id]);
   res.json({ ok: true });
 });
 
@@ -503,64 +543,65 @@ app.get('/api/admin/drawings/:file', requireAdmin, (req, res) => {
 });
 
 // Settings
-app.get('/api/admin/settings', requireAdmin, (req, res) => {
+app.get('/api/admin/settings', requireAdmin, async (req, res) => {
   const host = PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
   res.json({
-    store_name: getSetting('store_name', 'W SHOP'),
-    intro_text: getSetting('intro_text', DEFAULT_INTRO),
-    palette: getJSON('palette', DEFAULT_PALETTE),
-    locations: getJSON('locations', DEFAULT_LOCATIONS),
-    templates: getJSON('templates', DEFAULT_TEMPLATES),
+    store_name: await getSetting('store_name', 'W SHOP'),
+    intro_text: await getSetting('intro_text', DEFAULT_INTRO),
+    palette: await getJSON('palette', DEFAULT_PALETTE),
+    locations: await getJSON('locations', DEFAULT_LOCATIONS),
+    templates: await getJSON('templates', DEFAULT_TEMPLATES),
     email_configured: !!mailer(),
-    public_url: getSetting('public_url', host),
+    public_url: await getSetting('public_url', host),
     version: '1.0.0',
   });
 });
 
-app.put('/api/admin/settings', requireAdmin, (req, res) => {
+app.put('/api/admin/settings', requireAdmin, async (req, res) => {
   const b = req.body || {};
-  if (b.store_name !== undefined) setSetting('store_name', String(b.store_name).slice(0, 100));
-  if (b.public_url !== undefined) setSetting('public_url', String(b.public_url).slice(0, 200));
-  if (b.intro_text !== undefined) setSetting('intro_text', String(b.intro_text).slice(0, 500));
+  if (b.store_name !== undefined) await setSetting('store_name', String(b.store_name).slice(0, 100));
+  if (b.public_url !== undefined) await setSetting('public_url', String(b.public_url).slice(0, 200));
+  if (b.intro_text !== undefined) await setSetting('intro_text', String(b.intro_text).slice(0, 500));
   if (b.palette !== undefined) {
     if (!Array.isArray(b.palette) || b.palette.length > 30 || b.palette.some(c => !/^#[0-9a-fA-F]{6}$/.test(c)))
       return res.status(400).json({ error: 'Palette must be up to 30 hex colors like #ff0000' });
-    setJSON('palette', b.palette);
+    await setJSON('palette', b.palette);
   }
   if (b.locations !== undefined) {
     if (!Array.isArray(b.locations) || b.locations.length > 20 || b.locations.some(l => !String(l).trim() || String(l).length > 100))
       return res.status(400).json({ error: 'Invalid locations list' });
-    setJSON('locations', b.locations.map(String));
+    await setJSON('locations', b.locations.map(String));
   }
   if (b.templates !== undefined) {
     if (typeof b.templates !== 'object' || b.templates === null) return res.status(400).json({ error: 'Invalid templates' });
     const clean = {};
     for (const k of Object.keys(DEFAULT_TEMPLATES)) clean[k] = String(b.templates[k] ?? '').slice(0, 2000);
-    setJSON('templates', clean);
+    await setJSON('templates', clean);
   }
   res.json({ ok: true });
 });
 
-app.post('/api/admin/password', requireAdmin, (req, res) => {
+app.post('/api/admin/password', requireAdmin, async (req, res) => {
   const { current_password, new_password } = req.body || {};
-  const stored = getSetting('admin_pass_hash', admin.passHash);
+  const stored = await getSetting('admin_pass_hash', admin.passHash);
   if (!verifyPass(current_password || '', stored)) return res.status(400).json({ error: 'Current password incorrect' });
   if (!new_password || String(new_password).length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters' });
-  setSetting('admin_pass_hash', hashPass(new_password));
+  await setSetting('admin_pass_hash', hashPass(new_password));
   res.json({ ok: true });
 });
 
 // Admin QR codes
 app.get('/api/admin/qr/:id.svg', async (req, res) => {
-  const p = db.prepare('SELECT slug,name FROM products WHERE id=?').get(Number(req.params.id));
+  const p = (await query('SELECT slug,name FROM products WHERE id=$1', [Number(req.params.id)]))[0];
   if (!p) return res.status(404).send('Not found');
   const svg = await QRCode.toString(productUrl(req, p.slug), { type: 'svg', margin: 1, width: 400 });
   res.type('svg').send(svg);
 });
 
 // Product page SSR
-app.get('/p/:slug', (req, res) => {
-  const p = db.prepare('SELECT * FROM products WHERE slug=? AND available=1').get(req.params.slug);
+app.get('/p/:slug', async (req, res) => {
+  const rows = await query('SELECT * FROM products WHERE slug=$1 AND available=1', [req.params.slug]);
+  const p = rows[0];
   if (!p) return res.status(404).sendFile(path.join(ROOT, 'public', 'index.html'));
   const escaped = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = (c) => (c / 100).toFixed(2);
@@ -605,13 +646,13 @@ app.get('/p/:slug', (req, res) => {
     slug: p.slug,
     name: p.name,
     description: p.description,
-    priceCents: p.priceCents,
+    priceCents: p.price_cents,
     stock: p.stock,
-    imagePath: p.imagePath,
+    imagePath: p.image_path,
     variant: p.variant || '',
-    variantPrice2: p.variantPrice2 || 0,
-    specialStock: p.specialStock || 0,
-    drawingEnabled: p.drawingEnabled || 0,
+    variantPrice2: p.variant_price2 || 0,
+    specialStock: p.special_stock || 0,
+    drawingEnabled: p.drawing_enabled || 0,
   };
   const injected = '<script>window.__PRODUCT_DATA = ' + JSON.stringify(ssrData) + ';</script>';
   const finalHtml2 = finalHtml.replace('</head>', injected + '</head>');
@@ -629,5 +670,5 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[wshop] W SHOP running at http://localhost:${PORT}`);
   console.log(`[wshop] Admin panel: http://localhost:${PORT}/admin.html`);
-  console.log(`[wshop] IMPORTANT: Set PUBLIC_URL env var to your public domain for QR codes to work outside your network`);
+  console.log(`[wshop] PostgreSQL connected`);
 });
