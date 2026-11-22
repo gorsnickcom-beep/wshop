@@ -354,17 +354,20 @@ app.post('/api/orders', async (req, res) => {
 });
 
 // QR codes
-function productUrl(req, slug) {
-  const protocol = req.protocol || 'http';
-  const host = req.get('host') || 'localhost:3000';
-  return `${protocol}://${host}/p/${slug}`;
+async function productUrl(req, slug) {
+  let base = await getSetting('public_url', '') || PUBLIC_URL;
+  if (!base) {
+    const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
+    base = `${protocol}://${req.get('host') || 'localhost:3000'}`;
+  }
+  return `${base.replace(/\/+$/, '')}/p/${slug}`;
 }
 app.get('/qr/:slug.svg', async (req, res) => {
   const rows = await query('SELECT slug FROM products WHERE slug=$1', [req.params.slug]);
   const p = rows[0];
   if (!p) return res.status(404).send('Not found');
   try {
-    const svg = await QRCode.toString(productUrl(req, p.slug), { type: 'svg', margin: 1, width: 400 });
+    const svg = await QRCode.toString(await productUrl(req, p.slug), { type: 'svg', margin: 1, width: 400 });
     res.type('svg').send(svg);
   } catch (e) {
     res.status(500).send('QR generation failed');
@@ -596,7 +599,7 @@ app.post('/api/admin/password', requireAdmin, async (req, res) => {
 app.get('/api/admin/qr/:id.svg', async (req, res) => {
   const p = (await query('SELECT slug,name FROM products WHERE id=$1', [Number(req.params.id)]))[0];
   if (!p) return res.status(404).send('Not found');
-  const svg = await QRCode.toString(productUrl(req, p.slug), { type: 'svg', margin: 1, width: 400 });
+  const svg = await QRCode.toString(await productUrl(req, p.slug), { type: 'svg', margin: 1, width: 400 });
   res.type('svg').send(svg);
 });
 
