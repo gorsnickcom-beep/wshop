@@ -137,11 +137,11 @@ const DEFAULT_INTRO = 'Willkommen bei W SHOP – entdecke Produkte aus unserem S
     await query('DELETE FROM orders');
     await query('DELETE FROM products');
     const items = [
-      ['ei', 'Handbemaltes Ei', 'Verziere dein eigenes Ei mit unserem Zeicheneditor.', 1200, 50, 1, '/img/egg-placeholder.svg', 1, '', 0, 0, 1],
-      ['banane', 'Banane', 'Frische Banane aus dem Schaufenster.', 500, 50, 1, '/img/banane-placeholder.svg', 2, 'banana', 10000, 1, 0],
-      ['produkt-3', 'Produkt 3', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/placeholder.svg', 3, '', 0, 0, 0],
-      ['produkt-4', 'Produkt 4', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/placeholder.svg', 4, '', 0, 0, 0],
-    ];
+  ['ei', 'Handbemaltes Ei', 'Verziere dein eigenes Ei mit unserem Zeicheneditor.', 1200, 50, 1, '/img/eier.jpg', 1, '', 0, 0, 1],
+  ['banane', 'Banane', 'Frische Banane aus dem Schaufenster.', 500, 50, 1, '/img/banane.jpg', 2, 'banana', 10000, 1, 0],
+  ['produkt-3', 'Produkt 3', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/produkt3.jpg', 3, '', 0, 0, 0],
+  ['produkt-4', 'Produkt 4', 'Platzhalter – Name, Foto und Beschreibung im Admin-Panel ändern.', 0, 0, 1, '/img/produkt4.jpg', 4, '', 0, 0, 0],
+];
     for (const it of items) {
       await query(`INSERT INTO products(slug,name,description,price_cents,stock,available,image_path,sort,variant,variant_price2,special_stock,drawing_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, it);
     }
