@@ -236,7 +236,7 @@ const Admin = (() => {
         if (!inp.files[0]) return;
         const fd = new FormData();
         fd.append('image', inp.files[0]);
-        const res = await fetch(`/api/admin/products/${inp.dataset.upload}/image`, { method: 'POST', body: fd, credentials: 'same-origin' });
+        const res = await fetch(`/api/admin/products/${inp.dataset.upload}/image`, { method: 'POST', body: fd, headers: { Authorization: 'Bearer ' + localStorage.getItem('wshop_admin_token') } });
         const data = await res.json();
         if (!res.ok) alert(data.error || 'Upload failed');
         else renderProducts();
